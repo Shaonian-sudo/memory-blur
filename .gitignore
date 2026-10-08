@@ -1,0 +1,16 @@
+# build artifacts
+stills/
+stills_full/
+.frames-*/
+.vcheck/
+.verify*/
+debug.log
+node_modules/
+# voice & mixed audio (regenerable via TTS / build scripts)
+voice_*.wav
+voice_full.wav
+audio.wav
+concat.txt
+test*.wav
+# licensed BGM (not committed)
+bgm.mp3

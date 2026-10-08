@@ -1,0 +1,819 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=1080, initial-scale=1.0">
+<title>记忆为什么越久越模糊</title>
+<style>
+  html, body { margin: 0; padding: 0; background: #05070d; overflow: hidden; }
+  canvas { display: block; }
+</style>
+</head>
+<body>
+<canvas id="cv" width="1080" height="1920"></canvas>
+<script>
+"use strict";
+// ============ 全局时间轴（视频时间，秒） ============
+// 切点 = S2..S12 每句旁白起始时间（S1 自 0 起，前 1.5s 为标题前奏）
+const DEFAULT_CUTS = [7.65, 16.38, 22.53, 30.38, 36.23, 42.58, 49.61, 54.96, 62.89, 69.24, 76.27];
+const DEFAULT_DURATION = 88;
+
+// 旁白字幕（与 TTS 逐句一致）
+const LINES = [
+  { text: "你还能记得十年前的今天，发生了什么吗？", start: 1.5, end: 7.3 },
+  { text: "大多数人会说：记不清了。就像一盘录像带，放得越久，画面越模糊。", start: 7.65, end: 16.03 },
+  { text: "1885 年，心理学家艾宾浩斯，把这种直觉做成了实验。", start: 16.38, end: 22.18 },
+  { text: "他让人记无意义音节，发现 20 分钟后忘掉约四成，一天后只剩三分之一。", start: 22.53, end: 30.03 },
+  { text: "遗忘，似乎真的在随时间衰减。但真相，没那么简单。", start: 30.38, end: 35.88 },
+  { text: "1975 年，图尔文提出：遗忘不是记忆丢了，而是提取失败了。", start: 36.23, end: 42.23 },
+  { text: "就像话到嘴边说不出口，别人提示一个字，你立刻就想起来了。", start: 42.58, end: 49.26 },
+  { text: "更颠覆的是，记忆不是回放，而是重建。", start: 49.61, end: 54.61 },
+  { text: "1932 年，巴特利特让人传一个鬼怪故事。故事越传越短，越传越合理。", start: 54.96, end: 62.54 },
+  { text: "后来研究者还发现，事后的一句话，就能悄悄改写你的记忆。", start: 62.89, end: 68.89 },
+  { text: "所以记忆变模糊，不是因为时间把它磨掉了。", start: 69.24, end: 75.92 },
+  { text: "而是每一次回忆，你都在重新画它。它不是录像带，是一幅永远在修改的画。", start: 76.27, end: 84.17 },
+];
+
+// 每场风格：tint 背景色调 / particles 粒子数 / speed 上浮速度 / accent 强调色
+const SCENE_STYLE = [
+  { tint: [12, 20, 48], particles: 90, speed: 12, accent: "#8fb7ff" },   // S1 深夜蓝
+  { tint: [18, 22, 38], particles: 60, speed: 8, accent: "#9aa7c4" },    // S2 蓝灰
+  { tint: [40, 30, 14], particles: 40, speed: 6, accent: "#e8c07a" },    // S3 老照片棕
+  { tint: [28, 22, 8], particles: 70, speed: 14, accent: "#ffd76a" },    // S4 暖金
+  { tint: [10, 22, 34], particles: 90, speed: 10, accent: "#9fd0ff" },   // S5 冷钢蓝
+  { tint: [14, 12, 40], particles: 80, speed: 9, accent: "#b49bff" },    // S6 靛蓝
+  { tint: [34, 24, 8], particles: 70, speed: 12, accent: "#ffc46a" },    // S7 琥珀
+  { tint: [26, 16, 44], particles: 100, speed: 16, accent: "#d9a8ff" },  // S8 紫
+  { tint: [38, 26, 12], particles: 45, speed: 7, accent: "#f0c080" },    // S9 旧纸
+  { tint: [34, 10, 14], particles: 70, speed: 13, accent: "#ff8a80" },   // S10 绯红
+  { tint: [12, 26, 30], particles: 60, speed: 10, accent: "#7fe3e0" },   // S11 冷青
+  { tint: [26, 20, 4], particles: 140, speed: 18, accent: "#ffe08a" },   // S12 金
+];
+
+const cv = document.getElementById("cv");
+const ctx = cv.getContext("2d");
+const W = cv.width, H = cv.height;
+const FONT = '"Microsoft YaHei", "PingFang SC", "Noto Sans SC", sans-serif';
+
+// ============ 可配置时间轴 ============
+let timing = {
+  beatSeconds: 0.798,
+  beatPhaseSeconds: 0,
+  sceneCutTimes: DEFAULT_CUTS,
+  duration: DEFAULT_DURATION
+};
+function bounds() {
+  return [0, ...timing.sceneCutTimes, timing.duration];
+}
+window.configureTiming = function (value) {
+  if (!value) return;
+  if (Array.isArray(value.sceneCutTimes) && value.sceneCutTimes.length === 11) {
+    timing.sceneCutTimes = value.sceneCutTimes.map(Number);
+  }
+  if (Number.isFinite(value.duration)) timing.duration = value.duration;
+  if (Number.isFinite(value.beatSeconds)) timing.beatSeconds = value.beatSeconds;
+  if (Number.isFinite(value.beatPhaseSeconds)) timing.beatPhaseSeconds = value.beatPhaseSeconds;
+};
+
+// ============ 工具 ============
+function sceneIndexAt(t) {
+  const b = bounds();
+  for (let i = 0; i < b.length - 1; i += 1) {
+    if (t >= b[i] && t < b[i + 1]) return i;
+  }
+  return b.length - 2;
+}
+function sceneProgress(t, index) {
+  const b = bounds();
+  return Math.min(1, Math.max(0, (t - b[index]) / (b[index + 1] - b[index])));
+}
+function rr(x, y, w, h, r) {
+  ctx.beginPath();
+  ctx.moveTo(x + r, y);
+  ctx.arcTo(x + w, y, x + w, y + h, r);
+  ctx.arcTo(x + w, y + h, x, y + h, r);
+  ctx.arcTo(x, y + h, x, y, r);
+  ctx.arcTo(x, y, x + w, y, r);
+  ctx.closePath();
+}
+function hash01(seed) {
+  let s = seed * 2654435761 % 4294967296;
+  s = (s ^ (s >>> 15)) * 2246822519 % 4294967296;
+  return ((s ^ (s >>> 13)) >>> 0) / 4294967296;
+}
+function drawParticles(t, si) {
+  const st = SCENE_STYLE[si];
+  const n = st.particles;
+  const seedBase = si * 7919;
+  ctx.save();
+  for (let i = 0; i < n; i += 1) {
+    const h1 = hash01(seedBase + i * 3 + 1);
+    const h2 = hash01(seedBase + i * 3 + 2);
+    const h3 = hash01(seedBase + i * 3 + 3);
+    const x = h1 * W;
+    const y = ((h2 * H + t * st.speed * (0.5 + h3)) % H);
+    const r = 1 + h3 * 2.4;
+    ctx.globalAlpha = 0.16 + h3 * 0.3;
+    ctx.fillStyle = st.accent;
+    ctx.beginPath();
+    ctx.arc(x, y, r, 0, Math.PI * 2);
+    ctx.fill();
+  }
+  ctx.restore();
+}
+function drawBackground(t) {
+  const si = sceneIndexAt(t);
+  const st = SCENE_STYLE[si];
+  const p = sceneProgress(t, si);
+  // 场景间色调平滑过渡
+  const prev = SCENE_STYLE[Math.max(0, si - 1)];
+  const k = Math.min(1, p * 3);
+  const mix = (a, b) => a + (b - a) * k;
+  const r = mix(prev.tint[0], st.tint[0]);
+  const g = mix(prev.tint[1], st.tint[1]);
+  const b = mix(prev.tint[2], st.tint[2]);
+  const grad = ctx.createLinearGradient(0, 0, 0, H);
+  grad.addColorStop(0, `rgb(${Math.round(r * 0.55)},${Math.round(g * 0.55)},${Math.round(b * 0.55)})`);
+  grad.addColorStop(1, `rgb(${Math.round(r * 0.9)},${Math.round(g * 0.9)},${Math.round(b * 0.9)})`);
+  ctx.fillStyle = grad;
+  ctx.fillRect(0, 0, W, H);
+  drawParticles(t, si);
+}
+function drawTitleBar() {
+  ctx.save();
+  ctx.globalAlpha = 0.5;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `28px ${FONT}`;
+  ctx.textAlign = "center";
+  ctx.fillText("记忆为什么越久越模糊", W / 2, 74);
+  ctx.restore();
+}
+function captionLinesFor(line) {
+  const chars = Array.from(line.text);
+  const mid = Math.ceil(chars.length / 2);
+  return [chars.slice(0, mid), chars.slice(mid)];
+}
+function drawCaption(t) {
+  const line = LINES.find((l) => t >= l.start - 0.4 && t < l.end + 0.6);
+  if (!line) return;
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.textBaseline = "middle";
+  const [row1, row2] = captionLinesFor(line);
+  const all = [...row1, ...row2];
+  const charCount = all.length;
+  const dur = line.end - line.start;
+  const rows = [[row1, 1540], [row2, 1605]];
+  const baseSize = 47;
+  // 逐字高亮（按全局字符序）
+  let globalIdx = 0;
+  for (const [rowChars, y] of rows) {
+    const rowText = rowChars.join("");
+    const width = rowText.length * baseSize * 1.02;
+    let x = W / 2 - width / 2 + baseSize * 0.5;
+    for (let i = 0; i < rowChars.length; i += 1) {
+      const charTime = line.start + (globalIdx / charCount) * dur;
+      const done = t >= charTime;
+      ctx.font = `700 ${done ? baseSize + 3 : baseSize}px ${FONT}`;
+      ctx.fillStyle = done ? "#ffd76a" : "rgba(255,255,255,0.42)";
+      ctx.fillText(rowChars[i], x, y);
+      x += baseSize * 1.02;
+      globalIdx += 1;
+    }
+  }
+  ctx.restore();
+}
+
+// ============ 场景绘制 ============
+function drawScene1(t) { // 日历翻回十年前
+  const p = sceneProgress(t, 0);
+  if (t < 1.5) { // 标题前奏
+    ctx.save();
+    ctx.textAlign = "center";
+    const k = Math.min(1, t / 1.2);
+    ctx.globalAlpha = k;
+    ctx.fillStyle = "#ffd76a";
+    ctx.font = `600 88px ${FONT}`;
+    ctx.fillText("记忆为什么", W / 2, 830);
+    ctx.fillText("越久越模糊", W / 2, 945);
+    ctx.globalAlpha = k * 0.6;
+    ctx.fillStyle = "#ffffff";
+    ctx.font = `34px ${FONT}`;
+    ctx.fillText("一份关于遗忘的认知报告", W / 2, 1090);
+    ctx.restore();
+    return;
+  }
+  const tp = (t - 1.5) / 5.8; // 0..1
+  const year = 2026 - Math.min(10, Math.floor(tp * 12));
+  ctx.save();
+  ctx.textAlign = "center";
+  // 日历卡片
+  const cw = 600, ch = 660, cx = (W - cw) / 2, cy = 560;
+  ctx.fillStyle = "#1a2233";
+  rr(cx, cy, cw, ch, 28);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  ctx.fillStyle = "#e8ecf5";
+  ctx.font = `500 44px ${FONT}`;
+  ctx.fillText("十年前的今天", W / 2, cy + 90);
+  // 年份滚动
+  ctx.fillStyle = "#ffd76a";
+  ctx.font = `700 120px ${FONT}`;
+  ctx.fillText(String(year), W / 2, cy + 280);
+  ctx.fillStyle = "#9fb4d8";
+  ctx.font = `500 54px ${FONT}`;
+  ctx.fillText("10 · 08", W / 2, cy + 370);
+  ctx.fillStyle = "rgba(255,255,255,0.55)";
+  ctx.font = `400 34px ${FONT}`;
+  ctx.fillText("那天发生了什么？", W / 2, cy + 490);
+  // 翻页残影
+  ctx.globalAlpha = 0.14 * (1 - tp % 0.2 * 5);
+  ctx.fillStyle = "#ffffff";
+  ctx.fillRect(cx - 10, cy + 150 + (tp % 1) * 200, 6, 90);
+  ctx.restore();
+}
+function drawNoise(alpha, count) {
+  ctx.save();
+  ctx.globalAlpha = alpha;
+  ctx.fillStyle = "#ffffff";
+  for (let i = 0; i < count; i += 1) {
+    ctx.fillRect(hash01(i * 7 + 1) * W, hash01(i * 7 + 2) * H, 1.6, 1.6);
+  }
+  ctx.restore();
+}
+function drawScene2(t) { // 录像带劣化
+  const p = sceneProgress(t, 1);
+  ctx.save();
+  ctx.filter = `blur(${(p * 7).toFixed(1)}px)`;
+  ctx.textAlign = "center";
+  // 磁带盒
+  const bx = 290, by = 800, bw = 500, bh = 360;
+  ctx.fillStyle = "#10141f";
+  rr(bx, by, bw, bh, 26);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,255,255,0.35)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // 卷轴
+  const spin = p * Math.PI * 8;
+  for (const [cx, cy] of [[370, 970], [710, 970]]) {
+    ctx.strokeStyle = "#c7d2ea";
+    ctx.lineWidth = 14;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 100, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "#8fa3cc";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 60, 0, Math.PI * 2);
+    ctx.stroke();
+    ctx.strokeStyle = "#5c6f9e";
+    ctx.lineWidth = 4;
+    ctx.beginPath();
+    ctx.arc(cx, cy, 22, 0, Math.PI * 2);
+    ctx.stroke();
+    // 旋转辐条
+    ctx.strokeStyle = "rgba(255,255,255,0.5)";
+    ctx.lineWidth = 3;
+    for (let i = 0; i < 3; i += 1) {
+      const a = spin + i * Math.PI * 2 / 3;
+      ctx.beginPath();
+      ctx.moveTo(cx, cy);
+      ctx.lineTo(cx + Math.cos(a) * 100, cy + Math.sin(a) * 100);
+      ctx.stroke();
+    }
+  }
+  // 片头标签
+  ctx.fillStyle = "rgba(255,255,255,0.7)";
+  ctx.font = `500 30px ${FONT}`;
+  ctx.fillText("MEMORY · TAPE", W / 2, by + 70);
+  ctx.restore();
+  drawNoise(Math.min(0.5, p * 0.8), 260);
+  // 副标
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 36px ${FONT}`;
+  ctx.fillText("放得越久，画面越模糊", W / 2, 1350);
+  ctx.restore();
+}
+function drawScene3(t) { // 无意义音节实验
+  const p = sceneProgress(t, 2);
+  ctx.save();
+  ctx.textAlign = "center";
+  // 顶部：1885 + 实验台
+  ctx.fillStyle = "#e8c07a";
+  ctx.font = `700 92px ${FONT}`;
+  ctx.globalAlpha = Math.min(1, p * 2);
+  ctx.fillText("1885", W / 2, 300);
+  ctx.globalAlpha = 1;
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("艾宾浩斯 · 无意义音节实验", W / 2, 370);
+  // 实验台
+  ctx.fillStyle = "#3a3120";
+  ctx.fillRect(120, 460, 840, 26);
+  ctx.fillStyle = "rgba(255,255,255,0.12)";
+  ctx.fillRect(120, 486, 840, 12);
+  // 卡片 3x4
+  const syll = ["KAF", "TUV", "XIM", "BEP", "QOL", "RIJ", "WUZ", "MAH", "CEV", "GOF", "LIQ", "PUX"];
+  const cw = 200, ch = 130;
+  const startY = 640;
+  for (let i = 0; i < 12; i += 1) {
+    const appear = Math.min(1, Math.max(0, (p - i * 0.045) * 9));
+    if (appear <= 0) continue;
+    const col = i % 3, row = Math.floor(i / 3);
+    const x = 140 + col * (cw + 40);
+    const y = startY + row * (ch + 36);
+    ctx.globalAlpha = Math.min(1, appear);
+    ctx.fillStyle = "#241d12";
+    rr(x, y, cw, ch, 14);
+    ctx.fill();
+    ctx.strokeStyle = "rgba(232,192,122,0.55)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#e8c07a";
+    ctx.font = `600 40px ${FONT}`;
+    ctx.fillText(syll[i], x + cw / 2, y + ch / 2 + 12);
+  }
+  ctx.globalAlpha = 1;
+  ctx.restore();
+}
+function drawScene4(t) { // 遗忘曲线
+  const p = sceneProgress(t, 3);
+  const data = [
+    { label: "刚刚", v: 100 },
+    { label: "20分钟", v: 58.2 },
+    { label: "1小时", v: 44.2 },
+    { label: "1天", v: 33.7 },
+    { label: "31天", v: 21.1 },
+  ];
+  const ox = 150, oy = 1300, w = 780, h = 720;
+  const px = (i) => ox + (i / (data.length - 1)) * w;
+  const py = (v) => oy - (v / 100) * h;
+  ctx.save();
+  ctx.textAlign = "center";
+  // 轴
+  ctx.strokeStyle = "rgba(255,255,255,0.3)";
+  ctx.lineWidth = 2;
+  ctx.beginPath();
+  ctx.moveTo(ox, oy); ctx.lineTo(ox + w, oy);
+  ctx.moveTo(ox, oy); ctx.lineTo(ox, oy - h);
+  ctx.stroke();
+  ctx.fillStyle = "rgba(255,255,255,0.5)";
+  ctx.font = `400 26px ${FONT}`;
+  for (let i = 0; i < data.length; i += 1) {
+    ctx.fillText(data[i].label, px(i), oy + 50);
+  }
+  ctx.save();
+  ctx.translate(60, oy - h / 2);
+  ctx.rotate(-Math.PI / 2);
+  ctx.fillText("记忆保留率 %", 0, 0);
+  ctx.restore();
+  // 曲线
+  const segs = data.length - 1;
+  const drawTo = p * (segs + 0.5);
+  ctx.strokeStyle = "#ffd76a";
+  ctx.lineWidth = 7;
+  ctx.lineJoin = "round";
+  ctx.beginPath();
+  ctx.moveTo(px(0), py(data[0].v));
+  for (let i = 1; i <= segs; i += 1) {
+    if (i > drawTo) break;
+    const k = Math.min(1, drawTo - (i - 1));
+    const x0 = px(i - 1), y0 = py(data[i - 1].v);
+    const x1 = px(i), y1 = py(data[i].v);
+    if (k < 1) {
+      ctx.lineTo(x0 + (x1 - x0) * k, y0 + (y1 - y0) * k);
+    } else {
+      ctx.lineTo(x1, y1);
+    }
+  }
+  ctx.stroke();
+  // 数据点 + 标签
+  for (let i = 0; i < data.length; i += 1) {
+    if (i > Math.floor(drawTo) + 0.6 && i > 0) break;
+    const x = px(i), y = py(data[i].v);
+    ctx.fillStyle = "#1a1305";
+    ctx.beginPath();
+    ctx.arc(x, y, 10, 0, Math.PI * 2);
+    ctx.fill();
+    ctx.strokeStyle = "#ffd76a";
+    ctx.lineWidth = 3;
+    ctx.stroke();
+    ctx.fillStyle = "#ffd76a";
+    ctx.font = `700 34px ${FONT}`;
+    ctx.fillText(data[i].v + "%", x, y - 30);
+  }
+  ctx.restore();
+}
+function drawScene5(t) { // 大问号
+  const p = sceneProgress(t, 4);
+  ctx.save();
+  ctx.textAlign = "center";
+  // 背景残留曲线（半透明静态）
+  ctx.globalAlpha = 0.22;
+  ctx.strokeStyle = "#9fd0ff";
+  ctx.lineWidth = 6;
+  ctx.beginPath();
+  ctx.moveTo(150, 1300);
+  ctx.bezierCurveTo(350, 700, 550, 1100, 930, 620);
+  ctx.stroke();
+  ctx.globalAlpha = 1;
+  // 问号升起
+  const rise = Math.min(1, p * 1.6);
+  const y = 1900 - rise * 1000;
+  const scale = 0.6 + rise * 0.55;
+  ctx.save();
+  ctx.translate(W / 2, y);
+  ctx.scale(scale, scale);
+  ctx.fillStyle = "#ffd76a";
+  ctx.font = `700 460px ${FONT}`;
+  ctx.fillText("?", 0, 0);
+  ctx.restore();
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.font = `500 40px ${FONT}`;
+  ctx.fillText("真相，没那么简单", W / 2, 1650);
+  ctx.restore();
+}
+function drawScene6(t) { // 记忆库抽屉
+  const p = sceneProgress(t, 5);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("记忆库 · LTM", W / 2, 330);
+  const dw = 240, dh = 200, gx = 10, gy = 16;
+  const cols = 3, rows = 3;
+  const startX = 150, startY = 460;
+  // 光束摆动
+  const beamX = 540 + Math.sin(t * 0.9) * 330;
+  const litCol = Math.max(0, Math.min(2, Math.floor((beamX - startX) / (dw + gx))));
+  for (let r = 0; r < rows; r += 1) {
+    for (let c = 0; c < cols; c += 1) {
+      const x = startX + c * (dw + gx);
+      const y = startY + r * (dh + gy);
+      const lit = c === litCol;
+      ctx.fillStyle = lit ? "#2c2750" : "#171533";
+      rr(x, y, dw, dh, 16);
+      ctx.fill();
+      ctx.strokeStyle = lit ? "rgba(180,155,255,0.8)" : "rgba(255,255,255,0.2)";
+      ctx.lineWidth = 2;
+      ctx.stroke();
+      // 抽屉把手
+      ctx.fillStyle = lit ? "#b49bff" : "#5a5578";
+      ctx.fillRect(x + dw / 2 - 45, y + 20, 90, 10);
+      if (lit) {
+        // 里面内容轮廓（半透明显现）——记忆还在
+        ctx.globalAlpha = 0.85;
+        ctx.fillStyle = "#b49bff";
+        ctx.font = `600 60px ${FONT}`;
+        ctx.fillText("◈", x + dw / 2, y + dh / 2 + 24);
+        // 锁
+        ctx.fillStyle = "#7fe3e0";
+        ctx.fillRect(x + dw / 2 - 16, y + dh / 2 + 52, 32, 26);
+        ctx.strokeStyle = "#7fe3e0";
+        ctx.lineWidth = 4;
+        ctx.beginPath();
+        ctx.arc(x + dw / 2, y + dh / 2 + 44, 14, Math.PI, 0);
+        ctx.stroke();
+        ctx.globalAlpha = 1;
+      }
+    }
+  }
+  // 光锥
+  const grad = ctx.createLinearGradient(beamX, 400, beamX, 440 + rows * (dh + gy));
+  grad.addColorStop(0, "rgba(180,155,255,0.28)");
+  grad.addColorStop(1, "rgba(180,155,255,0.02)");
+  ctx.fillStyle = grad;
+  ctx.beginPath();
+  ctx.moveTo(beamX - 130, 400);
+  ctx.lineTo(beamX + 130, 400);
+  ctx.lineTo(beamX + 40, 440 + rows * (dh + gy));
+  ctx.lineTo(beamX - 40, 440 + rows * (dh + gy));
+  ctx.closePath();
+  ctx.fill();
+  ctx.restore();
+  // 标签
+  ctx.save();
+  ctx.textAlign = "center";
+  const reveal = Math.min(1, Math.max(0, (p - 0.55) * 4));
+  ctx.globalAlpha = reveal;
+  ctx.fillStyle = "#b49bff";
+  ctx.font = `700 44px ${FONT}`;
+  ctx.fillText("信息还在，线索丢了", W / 2, 1560);
+  ctx.restore();
+}
+function drawScene7(t) { // 舌尖现象
+  const p = sceneProgress(t, 6);
+  ctx.save();
+  ctx.textAlign = "center";
+  const bx = 160, by = 620, bw = 760, bh = 420;
+  ctx.fillStyle = "#1c1a10";
+  rr(bx, by, bw, bh, 30);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,196,106,0.6)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // 对话框尾巴
+  ctx.fillStyle = "#1c1a10";
+  ctx.beginPath();
+  ctx.moveTo(W / 2 - 40, by + bh);
+  ctx.lineTo(W / 2, by + bh + 60);
+  ctx.lineTo(W / 2 + 40, by + bh);
+  ctx.closePath();
+  ctx.fill();
+  if (p < 0.55) {
+    // 模糊抖动
+    const jitter = Math.sin(t * 30) * 4;
+    ctx.filter = "blur(2px)";
+    ctx.fillStyle = "rgba(255,255,255,0.7)";
+    ctx.font = `500 52px ${FONT}`;
+    ctx.fillText("那个字就在嘴边…", W / 2 + jitter, by + 190);
+    ctx.fillText("却怎么也想不起来", W / 2 - jitter, by + 280);
+    ctx.filter = "none";
+  } else {
+    // 提示点亮
+    const pulse = 1 + Math.sin(t * 6) * 0.05;
+    ctx.save();
+    ctx.translate(W / 2, by + 190);
+    ctx.scale(pulse, pulse);
+    ctx.fillStyle = "#ffd76a";
+    ctx.font = `700 130px ${FONT}`;
+    ctx.fillText("提", 0, 0);
+    ctx.restore();
+    ctx.fillStyle = "rgba(255,255,255,0.9)";
+    ctx.font = `500 46px ${FONT}`;
+    ctx.fillText("「提示的提」——一下就想起来了", W / 2, by + 330);
+  }
+  ctx.restore();
+}
+function drawScene8(t) { // 磁带→画笔
+  const p = sceneProgress(t, 7);
+  ctx.save();
+  ctx.textAlign = "center";
+  // 左：磁带（渐弱）
+  const tapeAlpha = Math.max(0, 1 - p * 1.8);
+  ctx.globalAlpha = tapeAlpha;
+  ctx.fillStyle = "#10141f";
+  rr(140, 700, 380, 300, 20);
+  ctx.fill();
+  ctx.strokeStyle = "#c7d2ea";
+  ctx.lineWidth = 10;
+  ctx.beginPath(); ctx.arc(240, 850, 80, 0, Math.PI * 2); ctx.stroke();
+  ctx.beginPath(); ctx.arc(420, 850, 80, 0, Math.PI * 2); ctx.stroke();
+  ctx.fillStyle = "#8fa3cc";
+  ctx.font = `600 60px ${FONT}`;
+  ctx.fillText("↺", 330, 660);
+  ctx.globalAlpha = 1;
+  // 右：画笔（渐强）
+  const brushAlpha = Math.min(1, Math.max(0, (p - 0.35) * 2.4));
+  ctx.globalAlpha = brushAlpha;
+  const bx = 700, by = 850;
+  ctx.strokeStyle = "#d9a8ff";
+  ctx.lineWidth = 16;
+  ctx.beginPath();
+  ctx.moveTo(bx - 120, by + 180);
+  ctx.lineTo(bx + 60, by - 60);
+  ctx.stroke();
+  ctx.fillStyle = "#d9a8ff";
+  ctx.beginPath();
+  ctx.moveTo(bx + 60, by - 60);
+  ctx.lineTo(bx + 130, by - 30);
+  ctx.lineTo(bx + 60, by + 10);
+  ctx.closePath();
+  ctx.fill();
+  ctx.strokeStyle = "#8a5fb8";
+  ctx.lineWidth = 3;
+  ctx.beginPath();
+  ctx.arc(bx + 120, by - 120, 60, 0, Math.PI * 2);
+  ctx.stroke();
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `600 60px ${FONT}`;
+  ctx.fillText("✎", bx + 120, by - 96);
+  ctx.globalAlpha = 1;
+  // 中间文字切换
+  ctx.fillStyle = p < 0.5 ? "#c7d2ea" : "#d9a8ff";
+  ctx.font = `700 64px ${FONT}`;
+  ctx.fillText(p < 0.5 ? "不是回放" : "而是重建", W / 2, 340);
+  ctx.restore();
+}
+function drawScene9(t) { // 故事越传越短
+  const p = sceneProgress(t, 8);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("1932 · 巴特利特《鬼怪故事》", W / 2, 330);
+  const stages = 5;
+  const baseW = 500, stepW = 52;
+  for (let i = 0; i < stages; i += 1) {
+    const appear = Math.min(1, Math.max(0, (p - i * 0.13) * 5));
+    if (appear <= 0) continue;
+    const w = baseW - i * stepW;
+    const h = 120 - i * 10;
+    const x = (W - w) / 2;
+    const y = 470 + i * 210;
+    ctx.globalAlpha = Math.min(1, appear) * (0.75 + i * 0.05);
+    ctx.fillStyle = "#241d12";
+    rr(x, y, w, h, 20);
+    ctx.fill();
+    ctx.strokeStyle = i === stages - 1 ? "rgba(240,192,128,0.9)" : "rgba(240,192,128,0.4)";
+    ctx.lineWidth = 2;
+    ctx.stroke();
+    ctx.fillStyle = "#e8c07a";
+    ctx.font = `500 ${40 - i * 2}px ${FONT}`;
+    if (i === stages - 1) {
+      ctx.fillText("「鬼」→ 幻觉", W / 2, y + h / 2 + 12);
+    } else {
+      ctx.fillText("故事 · 第" + (i + 1) + "次", W / 2, y + h / 2 + 12);
+    }
+    ctx.globalAlpha = 1;
+  }
+  // 词数标签
+  ctx.fillStyle = "#f0c080";
+  ctx.font = `700 52px ${FONT}`;
+  ctx.fillText("350 词 → 180 词", W / 2, 1620);
+  ctx.restore();
+}
+function drawScene10(t) { // 误导信息改写
+  const p = sceneProgress(t, 9);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("事后信息 · 误导信息效应（Loftus）", W / 2, 400);
+  const y = 900;
+  ctx.font = `600 58px ${FONT}`;
+  if (p < 0.3) {
+    // 原句
+    ctx.fillStyle = "#c9e7ff";
+    ctx.fillText("事故现场没有碎玻璃", W / 2, y);
+    ctx.fillStyle = "rgba(255,255,255,0.4)";
+    ctx.font = `400 30px ${FONT}`;
+    ctx.fillText("原本的记忆", W / 2, y + 80);
+  } else if (p < 0.52) {
+    // 墨迹涂抹
+    ctx.fillStyle = "#c9e7ff";
+    ctx.fillText("事故现场没有碎玻璃", W / 2, y);
+    ctx.globalAlpha = 0.75;
+    ctx.fillStyle = "#05070d";
+    const k = Math.min(1, (p - 0.3) / 0.22);
+    for (let i = 0; i < 26; i += 1) {
+      ctx.beginPath();
+      ctx.ellipse(W / 2 - 260 + hash01(i * 13 + 5) * 560, y - 30 + hash01(i * 13 + 6) * 60, 26 + hash01(i * 13 + 7) * 34, 12, hash01(i * 13 + 8) * Math.PI, 0, Math.PI * 2);
+      ctx.fill();
+    }
+    ctx.globalAlpha = 1;
+  } else {
+    // 新句（改写后）
+    ctx.fillStyle = "#ff8a80";
+    ctx.fillText("事故现场有碎玻璃", W / 2, y);
+    ctx.strokeStyle = "#ff8a80";
+    ctx.lineWidth = 5;
+    ctx.beginPath();
+    ctx.moveTo(W / 2 - 220, y + 55);
+    ctx.lineTo(W / 2 + 220, y + 55);
+    ctx.stroke();
+    ctx.fillStyle = "rgba(255,255,255,0.55)";
+    ctx.font = `400 30px ${FONT}`;
+    ctx.fillText("被事后的一句话悄悄改写", W / 2, y + 110);
+  }
+  ctx.restore();
+}
+function drawScene11(t) { // 橡皮擦不掉
+  const p = sceneProgress(t, 10);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("记忆不是被时间擦掉的", W / 2, 380);
+  // 时间痕迹（线）
+  const baseY = 950;
+  ctx.strokeStyle = "#c7d2ea";
+  ctx.lineWidth = 10;
+  ctx.lineCap = "round";
+  ctx.beginPath();
+  ctx.moveTo(150, baseY);
+  ctx.lineTo(930, baseY);
+  ctx.stroke();
+  // 橡皮擦扫过
+  const eraserX = 150 + p * 780;
+  ctx.fillStyle = "#f2e8d5";
+  rr(eraserX - 60, baseY - 44, 120, 88, 14);
+  ctx.fill();
+  ctx.strokeStyle = "#b8a98c";
+  ctx.lineWidth = 3;
+  ctx.stroke();
+  ctx.fillStyle = "#8a7b5f";
+  ctx.font = `500 24px ${FONT}`;
+  ctx.fillText("橡皮擦", eraserX, baseY + 4);
+  // 被擦过部分：痕迹仍半透明可见（擦不掉）
+  ctx.save();
+  ctx.globalAlpha = 0.32;
+  ctx.strokeStyle = "#ffd76a";
+  ctx.lineWidth = 5;
+  ctx.beginPath();
+  ctx.moveTo(150, baseY);
+  ctx.lineTo(eraserX, baseY);
+  ctx.stroke();
+  ctx.restore();
+  // 后半：画笔重画（金色）
+  if (p > 0.55) {
+    const k = (p - 0.55) / 0.45;
+    ctx.strokeStyle = "#ffd76a";
+    ctx.lineWidth = 6;
+    ctx.beginPath();
+    ctx.moveTo(150, baseY);
+    ctx.lineTo(150 + k * 780, baseY);
+    ctx.stroke();
+  }
+  ctx.fillStyle = "rgba(255,255,255,0.65)";
+  ctx.font = `500 40px ${FONT}`;
+  ctx.fillText("痕迹还在，只是换了画法", W / 2, 1320);
+  ctx.restore();
+}
+function drawScene12(t) { // 画布重绘 + 金句
+  const p = sceneProgress(t, 11);
+  ctx.save();
+  ctx.textAlign = "center";
+  ctx.fillStyle = "rgba(255,255,255,0.6)";
+  ctx.font = `400 32px ${FONT}`;
+  ctx.fillText("每一次回忆，都在重画", W / 2, 340);
+  // 画布
+  const bx = 170, by = 460, bw = 740, bh = 780;
+  ctx.fillStyle = "#141104";
+  rr(bx, by, bw, bh, 24);
+  ctx.fill();
+  ctx.strokeStyle = "rgba(255,224,138,0.4)";
+  ctx.lineWidth = 2;
+  ctx.stroke();
+  // 风景线稿：山 + 太阳，分 3 层重绘
+  const strokes = [];
+  for (let layer = 0; layer < 3; layer += 1) {
+    const off = layer * 6;
+    strokes.push({ color: `rgba(255,224,138,${0.35 + layer * 0.25})`, w: 3 + layer * 2, pts: [
+      [bx + 120 + off, by + 620], [bx + 300 + off * 0.5, by + 420], [bx + 470 - off, by + 600], [bx + 640 + off * 0.7, by + 380], [bx + 700, by + 560]
+    ] });
+  }
+  const totalSegs = strokes.length * 4;
+  const drawn = Math.min(totalSegs, Math.floor(p * totalSegs));
+  let seg = 0;
+  for (const s of strokes) {
+    ctx.strokeStyle = s.color;
+    ctx.lineWidth = s.w;
+    ctx.lineJoin = "round";
+    ctx.beginPath();
+    ctx.moveTo(s.pts[0][0], s.pts[0][1]);
+    for (let i = 1; i < s.pts.length; i += 1) {
+      if (seg >= drawn) break;
+      ctx.lineTo(s.pts[i][0], s.pts[i][1]);
+      seg += 1;
+    }
+    ctx.stroke();
+  }
+  // 太阳
+  ctx.fillStyle = "rgba(255,224,138,0.5)";
+  ctx.beginPath();
+  ctx.arc(bx + 520, by + 220, 52, 0, Math.PI * 2);
+  ctx.fill();
+  ctx.restore();
+  // 金句（大字，独立于字幕）
+  ctx.save();
+  ctx.textAlign = "center";
+  const reveal = Math.min(1, Math.max(0, (t - 78.5) / 3));
+  ctx.globalAlpha = reveal;
+  ctx.fillStyle = "#ffe08a";
+  ctx.font = `700 74px ${FONT}`;
+  ctx.fillText("它不是录像带", W / 2, 1380);
+  ctx.fillText("是一幅永远在修改的画", W / 2, 1480);
+  ctx.globalAlpha = reveal * 0.8;
+  ctx.fillStyle = "#ffffff";
+  ctx.font = `400 34px ${FONT}`;
+  ctx.fillText("MEMORY · REBUILT EVERY TIME", W / 2, 1580);
+  ctx.restore();
+}
+
+// ============ 主渲染 ============
+const SCENE_DRAW = [drawScene1, drawScene2, drawScene3, drawScene4, drawScene5, drawScene6, drawScene7, drawScene8, drawScene9, drawScene10, drawScene11, drawScene12];
+window.renderAt = function (t) {
+  const si = sceneIndexAt(t);
+  drawBackground(t);
+  ctx.save();
+  try {
+    SCENE_DRAW[si](t);
+  } catch (err) {
+    // 单场景异常不阻断渲染
+  }
+  ctx.restore();
+  drawCaption(t);
+  drawTitleBar();
+};
+
+// 预热首帧
+window.renderAt(0);
+</script>
+</body>
+</html>
